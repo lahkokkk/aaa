@@ -3,15 +3,13 @@ import ReactDOM from 'react-dom/client';
 import JSZip from 'jszip';
 import { GoogleGenAI, Type } from "@google/genai";
 
-// --- START OF COMBINED CODE ---
-
 // --- SERVICES ---
-export type WebFile = {
+type WebFile = {
     name: string;
     content: string;
 };
 
-export type RefinementResult = {
+type RefinementResult = {
     files: WebFile[];
     explanation: string;
 };
@@ -95,7 +93,7 @@ function parseJsonResponse(rawText: string, schema: any): any {
     }
 }
 
-export async function generateWebAppCode(description: string): Promise<WebFile[]> {
+async function generateWebAppCode(description: string): Promise<WebFile[]> {
   try {
     const genAI = getGenAI();
     const prompt = `You are an expert web developer. Your task is to create a web application based on the user's request.
@@ -141,7 +139,7 @@ User's Request: "${description}"
   }
 }
 
-export async function refineWebAppCode(instruction: string, currentFiles: WebFile[]): Promise<RefinementResult> {
+async function refineWebAppCode(instruction: string, currentFiles: WebFile[]): Promise<RefinementResult> {
     try {
         const genAI = getGenAI();
         const currentCodeString = currentFiles.map(file => `\`\`\`${file.name}\n${file.content}\n\`\`\``).join('\n\n');
@@ -239,19 +237,42 @@ const CodeResult: React.FC<{ files: WebFile[], onFileContentChange: (files: WebF
   const lineNumbersRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-      const handleMessage = (event: MessageEvent) => {
-          if (event.data && event.data.type === 'navigate') {
-              const pageName = event.data.page.split('/').pop();
-              if (files && files.some(f => f.name === pageName)) {
-                  setActivePreviewPage(pageName);
-              } else {
-                  console.warn(`Navigation to "${pageName}" was requested, but the file was not found.`);
-              }
-          }
-      };
-      window.addEventListener('message', handleMessage);
-      return () => window.removeEventListener('message', handleMessage);
-  }, [files]);
+    const virtualNavReinit = () => {
+      const pageFile = files.find(f => f.name === activePreviewPage);
+      if (!pageFile) return;
+
+      const jsFileNames = (pageFile.content.match(/<script.*?src="([^"]+\.js)"/g) || []).map(s => s.match(/src="([^"]+)"/)?.[1]).filter(Boolean);
+
+      const scriptsToInject = jsFileNames.map(name => files.find(f => f.name === name)?.content).filter(Boolean).join('\n');
+      
+      const iframe = document.querySelector('iframe');
+      if (iframe && iframe.contentWindow) {
+        try {
+          const scriptEl = iframe.contentWindow.document.createElement('script');
+          scriptEl.textContent = scriptsToInject;
+          iframe.contentWindow.document.body.appendChild(scriptEl);
+        } catch (e) {
+          console.error("Error re-injecting scripts:", e);
+        }
+      }
+    };
+
+    const handleMessage = (event: MessageEvent) => {
+        if (event.data && event.data.type === 'navigate') {
+            const pageName = event.data.page.split('/').pop();
+            if (files && files.some(f => f.name === pageName)) {
+                setActivePreviewPage(pageName);
+            } else {
+                console.warn(`Navigation to "${pageName}" was requested, but the file was not found.`);
+            }
+        }
+        if(event.data && event.data.type === 'virtual-nav-reinit') {
+            virtualNavReinit();
+        }
+    };
+    window.addEventListener('message', handleMessage);
+    return () => window.removeEventListener('message', handleMessage);
+  }, [files, activePreviewPage]);
 
   useEffect(() => {
     if (!files.some(f => f.name === selectedFile)) { setSelectedFile(files.find(f => f.name === 'index.html')?.name || files[0]?.name || ''); }
@@ -307,14 +328,36 @@ const CodeResult: React.FC<{ files: WebFile[], onFileContentChange: (files: WebF
         const cssFile = files.find(f => f.name === href);
         return cssFile ? `<style>\n${cssFile.content}\n</style>` : match;
     });
+    
     const scriptRegex = /<script\s+.*?src="([^"]+\.js)"[^>]*><\/script>/g;
-    htmlContent = htmlContent.replace(scriptRegex, (match, src) => {
-        const jsFile = files.find(f => f.name === src);
-        return jsFile ? `<script>\n${jsFile.content}\n</script>` : match;
-    });
+    htmlContent = htmlContent.replace(scriptRegex, '');
+
+
     const allFilesForNav = JSON.stringify(files.filter(f => f.name.endsWith('.html')).map(f => ({ name: f.name, content: f.content })));
-    const navigationScript = `<script>const allPages = ${allFilesForNav}; document.addEventListener('DOMContentLoaded', () => { document.querySelectorAll('a').forEach(link => { link.addEventListener('click', (event) => { const href = link.getAttribute('href'); const targetPage = allPages.find(p => p.name === href); if (href && !href.startsWith('http') && !href.startsWith('#') && targetPage) { event.preventDefault(); document.body.innerHTML = new DOMParser().parseFromString(targetPage.content, 'text/html').body.innerHTML; const newScripts = document.body.querySelectorAll('script'); newScripts.forEach(oldScript => { const newScript = document.createElement('script'); Array.from(oldScript.attributes).forEach(attr => newScript.setAttribute(attr.name, attr.value)); newScript.appendChild(document.createTextNode(oldScript.innerHTML)); oldScript.parentNode.replaceChild(newScript, oldScript); }); window.parent.postMessage({ type: 'virtual-nav-reinit' }, '*'); } }); }); }); window.addEventListener('message', (event) => { if(event.data && event.data.type === 'virtual-nav-reinit') { const fakeEvent = new Event('DOMContentLoaded'); document.dispatchEvent(fakeEvent); } }); </script>`;
-    return htmlContent.replace('</body>', `${navigationScript}</body>`);
+    const navigationScript = `<script>
+      const allPages = ${allFilesForNav};
+      document.addEventListener('DOMContentLoaded', () => {
+        document.querySelectorAll('a').forEach(link => {
+          link.addEventListener('click', (event) => {
+            const href = link.getAttribute('href');
+            const targetPage = allPages.find(p => p.name === href);
+            if (href && !href.startsWith('http') && !href.startsWith('#') && targetPage) {
+              event.preventDefault();
+              
+              const parser = new DOMParser();
+              const doc = parser.parseFromString(targetPage.content, 'text/html');
+
+              document.head.innerHTML = doc.head.innerHTML;
+              document.body.innerHTML = doc.body.innerHTML;
+
+              window.parent.postMessage({ type: 'virtual-nav-reinit' }, '*');
+            }
+          });
+        });
+      });
+    </script>`;
+    
+    return htmlContent.replace('</head>', `${navigationScript}</head>`);
   }, [files, activePreviewPage]);
 
   const handleCopyCode = useCallback(() => {
@@ -483,9 +526,7 @@ const App: React.FC = () => {
     </div>
   );
 };
-// FIX: The following block was causing multiple errors due to incorrect file concatenation.
-// It contained duplicate imports, invalid syntax, and conflicted with the 'App' component defined above.
-// It has been replaced with the correct application entry point logic.
+
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <App />
