@@ -1,0 +1,5 @@
+{
+  "name": "Aikacungwen",
+  "description": "A simple interface to generate web applications by describing them in a prompt, powered by Ai.",
+  "requestFramePermissions": []
+}
