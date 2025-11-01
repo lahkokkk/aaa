@@ -10,11 +10,22 @@ export type RefinementResult = {
     explanation: string;
 };
 
-if (!process.env.API_KEY) {
-    throw new Error("API_KEY environment variable not set.");
+// Lazily initialize the AI instance to avoid crashing on load if API_KEY is not set.
+let ai: GoogleGenAI | null = null;
+
+function getGenAI(): GoogleGenAI {
+    if (ai) {
+        return ai;
+    }
+    // Check for the API key at the time of use, not at script load.
+    if (!process.env.API_KEY) {
+        // This error will be caught by the calling function's try/catch block.
+        throw new Error("Kunci API Gemini tidak dikonfigurasi. Harap atur di lingkungan deployment Anda (misalnya, Variabel Lingkungan di Cloudflare Pages).");
+    }
+    ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    return ai;
 }
 
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
 const generationResponseSchema = {
     type: Type.OBJECT,
@@ -87,6 +98,7 @@ function parseJsonResponse(rawText: string, schema: any): any {
 
 export async function generateWebAppCode(description: string): Promise<WebFile[]> {
   try {
+    const genAI = getGenAI();
     const prompt = `You are an expert web developer. Your task is to create a web application based on the user's request.
 You must decide which files are necessary and generate them. For a standard web app, this usually includes 'index.html', 'style.css', and 'script.js'. For more complex requests, you may create additional files (e.g., 'about.html', 'portfolio.html').
 
@@ -112,7 +124,7 @@ Do not include any markdown fences or other text outside of the JSON object.
 
 User's Request: "${description}"
 `;
-    const result = await ai.models.generateContent({
+    const result = await genAI.models.generateContent({
         model: 'gemini-2.5-flash',
         contents: [{ parts: [{ text: prompt }] }],
         config: {
@@ -131,12 +143,16 @@ User's Request: "${description}"
 
   } catch (error) {
     console.error("Error calling Gemini API:", error);
+    if (error instanceof Error) {
+        throw error;
+    }
     throw new Error("Failed to communicate with the Gemini API.");
   }
 }
 
 export async function refineWebAppCode(instruction: string, currentFiles: WebFile[]): Promise<RefinementResult> {
     try {
+        const genAI = getGenAI();
         const currentCodeString = currentFiles.map(file => `\`\`\`${file.name}\n${file.content}\n\`\`\``).join('\n\n');
 
         const prompt = `Anda adalah asisten pengembang web AI yang ahli. Tugas Anda adalah memodifikasi aplikasi web yang ada berdasarkan permintaan pengguna dan menjelaskan perubahan yang Anda buat.
@@ -155,7 +171,7 @@ Sekarang, terapkan permintaan perubahan berikut dari pengguna: "${instruction}"
 6.  **Tanpa teks tambahan:** Jangan sertakan markdown atau teks lain di luar objek JSON tunggal ini.
 7.  **SANGAT PENTING: Penjelasan Anda HARUS dalam Bahasa Indonesia.** Jangan gunakan bahasa Inggris.
 `;
-        const result = await ai.models.generateContent({
+        const result = await genAI.models.generateContent({
             model: 'gemini-2.5-flash',
             contents: [{ parts: [{ text: prompt }] }],
             config: {
@@ -172,6 +188,9 @@ Sekarang, terapkan permintaan perubahan berikut dari pengguna: "${instruction}"
         return parseJsonResponse(rawText, refinementResponseSchema);
     } catch (error) {
         console.error("Error calling Gemini API for refinement:", error);
+        if (error instanceof Error) {
+            throw error;
+        }
         throw new Error("Failed to communicate with the Gemini API for refinement.");
     }
 }
